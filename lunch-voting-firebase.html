@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <title>Hlasování o obědě</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+    .container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }
+    button { padding: 10px 20px; margin: 5px; cursor: pointer; border: 1px solid #ddd; border-radius: 4px; background: white; }
+    button:hover { background: #f0f0f0; }
+    input { padding: 10px; margin: 5px 0; width: 100%; max-width: 300px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+    .hidden { display: none; }
+    .card { border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-radius: 4px; cursor: pointer; transition: all 0.2s; }
+    .card:hover { border-color: #0066cc; background: #f0f7ff; }
+    .card.voted { border: 2px solid #0066cc; background: #f0f7ff; }
+    .votes { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+    .vote-count { font-weight: bold; color: #0066cc; }
+    .vote-bar { flex: 1; height: 6px; background: #e0e0e0; margin: 0 10px; border-radius: 3px; }
+    .vote-fill { height: 100%; background: #0066cc; }
+    h1 { margin-top: 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin: 20px 0; }
+    .loading { text-align: center; color: #999; padding: 20px; }
+    .error { color: #d13212; padding: 10px; background: #fef3f0; border-radius: 4px; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🍽️ Hlasování o obědě</h1>
+
+    <!-- Přihlášení -->
+    <div id="loginArea">
+      <h2>Přihlášení</h2>
+      <button onclick="showCreate()">Založit session</button>
+      <button onclick="showJoin()">Připojit se</button>
+
+      <div id="createArea" class="hidden" style="margin-top: 20px; border: 1px solid #ddd; padding: 15px; border-radius: 4px;">
+        <h3>Nová session</h3>
+        <input type="text" id="newSessionCode" placeholder="Kód (např. FORD1)" maxlength="10" />
+        <input type="text" id="newUserName" placeholder="Tvé jméno" />
+        <button onclick="doCreate()">Vytvořit</button>
+        <button onclick="hideCreate()">Zrušit</button>
+        <div id="createError" class="error hidden"></div>
+      </div>
+
+      <div id="joinArea" class="hidden" style="margin-top: 20px; border: 1px solid #ddd; padding: 15px; border-radius: 4px;">
+        <h3>Připojit se</h3>
+        <input type="text" id="joinCode" placeholder="Kód session" />
+        <input type="text" id="joinName" placeholder="Tvé jméno" />
+        <button onclick="doJoin()">Připojit</button>
+        <button onclick="hideJoin()">Zrušit</button>
+        <div id="joinError" class="error hidden"></div>
+      </div>
+
+      <div id="firebaseError" class="error hidden" style="margin-top: 20px;"></div>
+      <div id="firebaseLoading" class="loading">⏳ Připojuji se k Firebase...</div>
+    </div>
+
+    <!-- Aplikace -->
+    <div id="appArea" class="hidden">
+      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #ddd; padding-bottom: 15px; margin-bottom: 20px;">
+        <div>
+          <h2 id="sessionCode" style="color: #0066cc; margin: 0;">FORD1</h2>
+          <p id="userName" style="margin: 5px 0 0 0; color: #666;">Přihlášen jako: Jan</p>
+        </div>
+        <button onclick="logout()">Odhlásit se</button>
+      </div>
+
+      <p id="dateInfo" style="text-align: center; color: #666;"></p>
+
+      <div class="grid" id="restaurantGrid"></div>
+
+      <div style="margin-top: 30px; padding: 15px; background: #f9f9f9; border-radius: 4px;">
+        <h3>Účastníci (<span id="participantCount">0</span>)</h3>
+        <div id="participantList" style="display: flex; flex-wrap: wrap; gap: 8px;"></div>
+      </div>
+
+      <div id="resultsArea" class="hidden" style="margin-top: 30px; padding: 20px; background: #e8f4f8; border-radius: 4px; text-align: center;">
+        <h2 id="winnerName" style="color: #0066cc;">-</h2>
+        <p id="winnerVotes">-</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js"></script>
+
+  <script>
+    const MENUS = [
+      { id: 1, name: "Jídlovice Dejvice", cuisine: "Česká", menu: "Svíčková, Kuřecí řízek, Burger" },
+      { id: 2, name: "Meat Market Bistro", cuisine: "Steakhouse", menu: "Steak, Kuřecí prsíčko, Zelenina" },
+      { id: 3, name: "U Fleků", cuisine: "Česká", menu: "Goulash, Řízek, Bramborák" },
+      { id: 4, name: "Lotos", cuisine: "Vietnamská", menu: "Pho hovězí, Spring rolls, Pad Thai" },
+      { id: 5, name: "Italská", cuisine: "Italská", menu: "Pasta Carbonara, Pizza, Risotto" }
+    ];
+
+    let db = null;
+    let currentSession = null;
+    let currentUser = null;
+    let firebaseReady = false;
+
+    // Inicializuj Firebase
+    const firebaseConfig = {
+      apiKey: "eCJuuo3yOttSBSrntOMAvTCzO9wGtmDz3YDMCFl4",
+      authDomain: "lunch-voting-d44ca.firebaseapp.com",
+      databaseURL: "https://lunch-voting-d44ca-default-rtdb.europe-west1.firebasedatabase.app",
+      projectId: "lunch-voting-d44ca",
+      storageBucket: "lunch-voting-d44ca.appspot.com",
+      messagingSenderId: "123456789",
+      appId: "1:123456789:web:abcdef123456"
+    };
+
+    try {
+      firebase.initializeApp(firebaseConfig);
+      db = firebase.database();
+      firebaseReady = true;
+      document.getElementById('firebaseLoading').classList.add('hidden');
+      console.log('Firebase inicializován ✅');
+    } catch (e) {
+      console.log('Chyba Firebase:', e);
+      document.getElementById('firebaseError').innerHTML = '⚠️ Firebase se nepodařilo inicializovat. Zkus localStorage verzi.';
+      document.getElementById('firebaseError').classList.remove('hidden');
+      document.getElementById('firebaseLoading').classList.add('hidden');
+    }
+
+    // UI
+    function showCreate() {
+      document.getElementById('createArea').classList.remove('hidden');
+      document.getElementById('joinArea').classList.add('hidden');
+    }
+
+    function hideCreate() {
+      document.getElementById('createArea').classList.add('hidden');
+      document.getElementById('createError').classList.add('hidden');
+      document.getElementById('createError').innerHTML = '';
+    }
+
+    function showJoin() {
+      document.getElementById('joinArea').classList.remove('hidden');
+      document.getElementById('createArea').classList.add('hidden');
+    }
+
+    function hideJoin() {
+      document.getElementById('joinArea').classList.add('hidden');
+      document.getElementById('joinError').classList.add('hidden');
+      document.getElementById('joinError').innerHTML = '';
+    }
+
+    function doCreate() {
+      const code = document.getElementById('newSessionCode').value.toUpperCase().trim();
+      const name = document.getElementById('newUserName').value.trim();
+      const err = document.getElementById('createError');
+
+      if (!code || !name) {
+        err.innerHTML = '❌ Vyplň všechna pole';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      if (!firebaseReady) {
+        err.innerHTML = '❌ Firebase není připravený';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      // Vytvoř v Firebase
+      const sessionRef = db.ref('sessions/' + code);
+      sessionRef.once('value', snapshot => {
+        if (snapshot.exists()) {
+          err.innerHTML = '❌ Session už existuje';
+          err.classList.remove('hidden');
+          return;
+        }
+
+        const newSession = {
+          participants: [name],
+          votes: {}
+        };
+        MENUS.forEach(m => newSession.votes[m.id] = []);
+        newSession.votes[MENUS[0].id] = [name];
+
+        sessionRef.set(newSession).then(() => {
+          currentSession = code;
+          currentUser = name;
+          showApp();
+        }).catch(err => {
+          document.getElementById('createError').innerHTML = '❌ Chyba: ' + err.message;
+          document.getElementById('createError').classList.remove('hidden');
+        });
+      });
+    }
+
+    function doJoin() {
+      const code = document.getElementById('joinCode').value.toUpperCase().trim();
+      const name = document.getElementById('joinName').value.trim();
+      const err = document.getElementById('joinError');
+
+      if (!code || !name) {
+        err.innerHTML = '❌ Vyplň všechna pole';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      if (!firebaseReady) {
+        err.innerHTML = '❌ Firebase není připravený';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      const sessionRef = db.ref('sessions/' + code);
+      sessionRef.once('value', snapshot => {
+        if (!snapshot.exists()) {
+          err.innerHTML = '❌ Session nenalezena';
+          err.classList.remove('hidden');
+          return;
+        }
+
+        const session = snapshot.val();
+        if (session.participants.includes(name)) {
+          err.innerHTML = '❌ Jméno už existuje';
+          err.classList.remove('hidden');
+          return;
+        }
+
+        session.participants.push(name);
+        sessionRef.set(session).then(() => {
+          currentSession = code;
+          currentUser = name;
+          showApp();
+        }).catch(err => {
+          document.getElementById('joinError').innerHTML = '❌ Chyba: ' + err.message;
+          document.getElementById('joinError').classList.remove('hidden');
+        });
+      });
+    }
+
+    function showApp() {
+      document.getElementById('loginArea').classList.add('hidden');
+      document.getElementById('appArea').classList.remove('hidden');
+      listenToSession();
+    }
+
+    function listenToSession() {
+      const sessionRef = db.ref('sessions/' + currentSession);
+      sessionRef.on('value', snapshot => {
+        if (snapshot.exists()) {
+          render(snapshot.val());
+        }
+      });
+    }
+
+    function render(session) {
+      // Info
+      document.getElementById('sessionCode').innerHTML = currentSession;
+      document.getElementById('userName').innerHTML = `Přihlášen jako: ${currentUser}`;
+      document.getElementById('dateInfo').innerHTML = `Dnes je ${new Date().toLocaleDateString('cs-CZ', { weekday: 'long' })}`;
+      document.getElementById('participantCount').innerHTML = session.participants.length;
+
+      // Účastníci
+      document.getElementById('participantList').innerHTML = session.participants
+        .map(p => `<div style="background: #0066cc; color: white; padding: 5px 10px; border-radius: 4px; font-size: 12px;">${p}</div>`)
+        .join('');
+
+      // Restaurace
+      const grid = document.getElementById('restaurantGrid');
+      grid.innerHTML = MENUS.map(m => {
+        const votes = (session.votes[m.id] || []).length;
+        const total = session.participants.length || 1;
+        const pct = Math.round((votes / total) * 100);
+        const isVoted = (session.votes[m.id] || []).includes(currentUser);
+
+        return `
+          <div class="card ${isVoted ? 'voted' : ''}" onclick="vote(${m.id})">
+            <h3 style="margin: 0 0 5px 0;">${m.name}</h3>
+            <p style="margin: 0 0 10px 0; color: #999; font-size: 12px;">${m.cuisine}</p>
+            <p style="background: #f9f9f9; padding: 8px; border-radius: 4px; margin: 0 0 10px 0;">${m.menu}</p>
+            <div class="votes">
+              <span class="vote-count">${votes} hlasů</span>
+              <div class="vote-bar"><div class="vote-fill" style="width: ${pct}%"></div></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      // Výsledky
+      const maxVotes = Math.max(...MENUS.map(m => (session.votes[m.id] || []).length));
+      if (maxVotes > 0) {
+        const winner = MENUS.find(m => (session.votes[m.id] || []).length === maxVotes);
+        document.getElementById('resultsArea').classList.remove('hidden');
+        document.getElementById('winnerName').innerHTML = `🎉 ${winner.name}`;
+        document.getElementById('winnerVotes').innerHTML = `${maxVotes} ${maxVotes === 1 ? 'hlas' : 'hlasů'}`;
+      } else {
+        document.getElementById('resultsArea').classList.add('hidden');
+      }
+    }
+
+    function vote(id) {
+      const sessionRef = db.ref('sessions/' + currentSession);
+      sessionRef.once('value', snapshot => {
+        if (!snapshot.exists()) return;
+
+        const session = snapshot.val();
+
+        // Odstraň starý hlas
+        MENUS.forEach(m => {
+          session.votes[m.id] = (session.votes[m.id] || []).filter(u => u !== currentUser);
+        });
+
+        // Přidej nový
+        if (!session.votes[id]) session.votes[id] = [];
+        session.votes[id].push(currentUser);
+
+        sessionRef.set(session);
+      });
+    }
+
+    function logout() {
+      const sessionRef = db.ref('sessions/' + currentSession);
+      sessionRef.once('value', snapshot => {
+        if (!snapshot.exists()) return;
+
+        const session = snapshot.val();
+        session.participants = session.participants.filter(p => p !== currentUser);
+
+        MENUS.forEach(m => {
+          session.votes[m.id] = (session.votes[m.id] || []).filter(u => u !== currentUser);
+        });
+
+        if (session.participants.length === 0) {
+          sessionRef.remove();
+        } else {
+          sessionRef.set(session);
+        }
+
+        currentSession = null;
+        currentUser = null;
+        document.getElementById('appArea').classList.add('hidden');
+        document.getElementById('loginArea').classList.remove('hidden');
+        hideCreate();
+        hideJoin();
+      });
+    }
+
+    // Start
+    document.getElementById('dateInfo').innerHTML = `Dnes je ${new Date().toLocaleDateString('cs-CZ', { weekday: 'long' })}`;
+  </script>
+</body>
+</html>
